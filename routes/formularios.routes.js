@@ -1,6 +1,6 @@
 import express from 'express';
 import pool from '../config/database.js';
-import enviarEmailNotificacionLead from '../services/emailService.js';
+import { enviarEmailNotificacionLead } from '../services/emailService.js';
 
 const router = express.Router();
 
@@ -19,109 +19,112 @@ router.post('/submit', async (req, res) => {
     });
   }
 
+  const client = await pool.connect();
   try {
-    const connection = await pool.getConnection();
-    
-    try {
-      // 1. Encontrar el formulario por slug
-      const [formularios] = await connection.query(
-        'SELECT id, empresa_id FROM formularios_leads WHERE slug = ?',
-        [slug]
+    // 1. Encontrar el formulario por slug
+    const formularioResult = await client.query(
+      'SELECT id, empresa_id FROM formularios_leads WHERE slug = $1',
+      [slug]
+    );
+
+    if (formularioResult.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Formulario no encontrado' 
+      });
+    }
+
+    const { id: formulario_id, empresa_id } = formularioResult.rows[0];
+
+    // 2. Verificar si el cliente ya existe
+    const clienteExistenteResult = await client.query(
+      'SELECT id FROM clientes WHERE email = $1 AND empresa_id = $2',
+      [email, empresa_id]
+    );
+
+    let cliente_id;
+
+    if (clienteExistenteResult.rows.length > 0) {
+      // Cliente existe, actualizar
+      cliente_id = clienteExistenteResult.rows[0].id;
+      await client.query(
+        `UPDATE clientes 
+         SET nombre = $1, apellidos = $2, telefono = $3, estado = $4, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5`,
+        [nombre, apellidos, telefono, 'contactado', cliente_id]
       );
-
-      if (formularios.length === 0) {
-        return res.status(404).json({ 
-          success: false,
-          error: 'Formulario no encontrado' 
-        });
-      }
-
-      const { id: formulario_id, empresa_id } = formularios[0];
-
-      // 2. Verificar si el cliente ya existe
-      const [clientesExistentes] = await connection.query(
-        'SELECT id FROM clientes WHERE email = ? AND empresa_id = ?',
-        [email, empresa_id]
+    } else {
+      // Crear nuevo cliente
+      const nuevoClienteResult = await client.query(
+        `INSERT INTO clientes (empresa_id, nombre, apellidos, email, telefono, origen, estado)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id`,
+        [empresa_id, nombre, apellidos, email, telefono, 'formulario_web', 'recibido']
       );
+      cliente_id = nuevoClienteResult.rows[0].id;
+    }
 
-      let cliente_id;
+    // 3. Registrar en logs del cliente
+    await client.query(
+      `INSERT INTO logs_leads (cliente_id, accion, detalles)
+       VALUES ($1, $2, $3)`,
+      [cliente_id, 'formulario_enviado', JSON.stringify({ 
+        mensaje, 
+        formulario_id,
+        fecha_envio: new Date().toISOString()
+      })]
+    );
 
-      if (clientesExistentes.length > 0) {
-        // Cliente existe, actualizar
-        cliente_id = clientesExistentes[0].id;
-        await connection.query(
-          `UPDATE clientes 
-           SET nombre = ?, apellidos = ?, telefono = ?, estado = 'contactado', updated_at = NOW()
-           WHERE id = ?`,
-          [nombre, apellidos, telefono, cliente_id]
-        );
-      } else {
-        // Crear nuevo cliente
-        const [resultado] = await connection.query(
-          `INSERT INTO clientes (empresa_id, nombre, apellidos, email, telefono, origen, estado)
-           VALUES (?, ?, ?, ?, ?, 'formulario_web', 'recibido')`,
-          [empresa_id, nombre, apellidos, email, telefono]
-        );
-        cliente_id = resultado.insertId;
-      }
+    // 4. Obtener datos de la empresa
+    const empresaResult = await client.query(
+      'SELECT nombre, email_notificaciones FROM empresas WHERE id = $1',
+      [empresa_id]
+    );
 
-      // 3. Registrar en logs del cliente
-      await connection.query(
-        `INSERT INTO logs_leads (cliente_id, accion, detalles)
-         VALUES (?, 'formulario_enviado', ?)`,
-        [cliente_id, JSON.stringify({ 
-          mensaje, 
-          formulario_id,
-          fecha_envio: new Date().toISOString()
-        })]
-      );
+    const empresa_nombre = empresaResult.rows[0]?.nombre;
+    const email_empresa = empresaResult.rows[0]?.email_notificaciones;
 
-      // 4. Obtener datos de la empresa
-      const [empresas] = await connection.query(
-        'SELECT nombre, email_notificaciones FROM empresas WHERE id = ?',
-        [empresa_id]
-      );
+    // 5. Preparar datos para email
+    const datosLead = {
+      nombre,
+      apellidos,
+      email,
+      telefono,
+      mensaje,
+      origen: 'formulario_web',
+      empresa_nombre
+    };
 
-      const empresa_nombre = empresas[0]?.nombre;
-      const email_empresa = empresas[0]?.email_notificaciones;
+    // 6. Enviar email SOLO a la empresa
+    let emailsEnviados = [];
 
-      // 5. Preparar datos para email
-      const datosLead = {
-        nombre,
-        apellidos,
-        email,
-        telefono,
-        mensaje,
-        origen: 'formulario_web',
-        empresa_nombre
-      };
-
-      // 6. Enviar email SOLO a la empresa
-      let emailsEnviados = [];
-
-      if (email_empresa) {
+    if (email_empresa) {
+      try {
         const resultEmpresa = await enviarEmailNotificacionLead(email_empresa, datosLead);
         if (resultEmpresa.success) {
           emailsEnviados.push(`empresa (${email_empresa})`);
         }
+      } catch (emailError) {
+        console.error('Error enviando email:', emailError);
+        // No bloqueamos si el email falla
       }
-
-      res.json({
-        success: true,
-        message: 'Lead registrado correctamente',
-        cliente_id,
-        emailsEnviados
-      });
-
-    } finally {
-      connection.release();
     }
+
+    res.json({
+      success: true,
+      message: 'Lead registrado correctamente',
+      cliente_id,
+      emailsEnviados
+    });
+
   } catch (error) {
     console.error('Error en formularios/submit:', error);
     res.status(500).json({
       success: false,
       error: 'Error al procesar el formulario'
     });
+  } finally {
+    client.release();
   }
 });
 
