@@ -120,7 +120,7 @@ router.get('/leads', async (req, res) => {
     const totalResult = await client.query(totalQuery, params);
     const total = totalResult.rows[0].total;
 
-    // Leads con usuario que cambió estado
+    // Leads con usuario que cambió estado - AGREGUÉ CAMPO mensaje
     const leadsParams = [...params, parseInt(limite), offset];
     const leadsQuery = `
       SELECT 
@@ -129,6 +129,7 @@ router.get('/leads', async (req, res) => {
         c.apellidos,
         c.email,
         c.telefono,
+        c.mensaje,
         c.estado,
         c.origen,
         c.notas as respuesta_mensaje,

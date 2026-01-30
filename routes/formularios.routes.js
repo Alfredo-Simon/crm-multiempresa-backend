@@ -36,33 +36,15 @@ router.post('/submit', async (req, res) => {
 
     const { id: formulario_id, empresa_id } = formularioResult.rows[0];
 
-    // 2. Verificar si el cliente ya existe
-    const clienteExistenteResult = await client.query(
-      'SELECT id FROM clientes WHERE email = $1 AND empresa_id = $2',
-      [email, empresa_id]
+    // 2. CAMBIO: Siempre crear un nuevo registro (no verificar si existe)
+    // De esta forma todos los envíos del formulario quedan registrados como leads separados
+    const nuevoClienteResult = await client.query(
+      `INSERT INTO clientes (empresa_id, nombre, apellidos, email, telefono, mensaje, origen, estado)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [empresa_id, nombre, apellidos, email, telefono, mensaje, 'formulario_web', 'recibido']
     );
-
-    let cliente_id;
-
-    if (clienteExistenteResult.rows.length > 0) {
-      // Cliente existe, actualizar
-      cliente_id = clienteExistenteResult.rows[0].id;
-      await client.query(
-        `UPDATE clientes 
-         SET nombre = $1, apellidos = $2, telefono = $3, estado = $4, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $5`,
-        [nombre, apellidos, telefono, 'contactado', cliente_id]
-      );
-    } else {
-      // Crear nuevo cliente
-      const nuevoClienteResult = await client.query(
-        `INSERT INTO clientes (empresa_id, nombre, apellidos, email, telefono, origen, estado)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id`,
-        [empresa_id, nombre, apellidos, email, telefono, 'formulario_web', 'recibido']
-      );
-      cliente_id = nuevoClienteResult.rows[0].id;
-    }
+    const cliente_id = nuevoClienteResult.rows[0].id;
 
     // 3. Registrar en logs del cliente
     await client.query(
