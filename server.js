@@ -10,6 +10,7 @@ import authRoutes from './routes/auth.js';
 import leadsRoutes from './routes/leads.js';
 import clientsRoutes from './routes/clients.js';
 import dashboardRoutes from './routes/dashboard.js';
+import usuariosRoutes from './routes/usuarios.js';
 import excelRoutes from './routes/excel.js';
 import formulariosRoutes from './routes/formularios.routes.js';
 
@@ -54,6 +55,7 @@ app.use('/api/formularios', formulariosRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/clients', clientsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/usuarios', usuariosRoutes);
 app.use('/api/excel', excelRoutes);
 
 // Health check
