@@ -5,10 +5,15 @@ import bcrypt from 'bcryptjs';
 
 const router = express.Router();
 
+// Roles válidos del sistema
+const ROLES_VALIDOS = ['superadmin', 'ceo', 'directivo', 'comercial'];
+
 // Aplicar autenticación a todas las rutas
 router.use(autenticar);
 
-// Middleware para validar que es superadmin
+/**
+ * Middleware para validar que es superadmin
+ */
 const esSuperadmin = (req, res, next) => {
   if (req.usuario?.role !== 'superadmin') {
     return res.status(403).json({
@@ -20,18 +25,53 @@ const esSuperadmin = (req, res, next) => {
 };
 
 /**
- * GET /api/usuarios
- * Listar todos los usuarios (solo superadmin)
+ * Middleware para validar que es CEO o Superadmin
  */
-router.get('/', esSuperadmin, async (req, res) => {
+const esCeoOSuperadmin = (req, res, next) => {
+  if (!['ceo', 'superadmin'].includes(req.usuario?.role)) {
+    return res.status(403).json({
+      success: false,
+      error: 'Solo CEO y Superadmin pueden acceder a esta función'
+    });
+  }
+  next();
+};
+
+/**
+ * GET /api/usuarios
+ * Listar usuarios según rol:
+ * - Superadmin: Ve todos los usuarios de todas las empresas
+ * - CEO: Ve solo usuarios de su empresa
+ */
+router.get('/', async (req, res) => {
   const client = await pool.connect();
   try {
-    const query = `SELECT u.id, u.nombre, u.email, u.role, u.activo, u.empresa_id, e.nombre as nombre_empresa 
-                   FROM usuarios u 
-                   LEFT JOIN empresas e ON u.empresa_id = e.id 
-                   ORDER BY u.created_at DESC`;
-    const result = await client.query(query);
-    
+    let query, params;
+
+    if (req.usuario?.role === 'superadmin') {
+      // Superadmin ve todos
+      query = `SELECT u.id, u.nombre, u.email, u.role, u.activo, u.empresa_id, e.nombre as nombre_empresa 
+               FROM usuarios u 
+               LEFT JOIN empresas e ON u.empresa_id = e.id 
+               ORDER BY u.created_at DESC`;
+      params = [];
+    } else if (req.usuario?.role === 'ceo') {
+      // CEO ve solo su empresa
+      query = `SELECT u.id, u.nombre, u.email, u.role, u.activo, u.empresa_id, e.nombre as nombre_empresa 
+               FROM usuarios u 
+               LEFT JOIN empresas e ON u.empresa_id = e.id 
+               WHERE u.empresa_id = $1 OR u.id = $2
+               ORDER BY u.created_at DESC`;
+      params = [req.usuario.empresa_id, req.usuario.usuario_id];
+    } else {
+      // Directivo y Comercial no pueden ver lista de usuarios
+      return res.status(403).json({
+        success: false,
+        error: 'No tienes permiso para listar usuarios'
+      });
+    }
+
+    const result = await client.query(query, params);
     res.json({
       success: true,
       usuarios: result.rows
@@ -51,7 +91,7 @@ router.get('/', esSuperadmin, async (req, res) => {
  * GET /api/usuarios/:id
  * Obtener un usuario específico
  */
-router.get('/:id', esSuperadmin, async (req, res) => {
+router.get('/:id', async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
@@ -68,9 +108,30 @@ router.get('/:id', esSuperadmin, async (req, res) => {
       });
     }
 
+    const usuario = result.rows[0];
+
+    // Validar permisos
+    if (req.usuario?.role === 'superadmin') {
+      // Superadmin puede ver cualquier usuario
+    } else if (req.usuario?.role === 'ceo') {
+      // CEO solo puede ver usuarios de su empresa
+      if (usuario.empresa_id !== req.usuario.empresa_id) {
+        return res.status(403).json({
+          success: false,
+          error: 'No tienes permiso para ver este usuario'
+        });
+      }
+    } else {
+      // Directivo y Comercial no pueden ver usuarios
+      return res.status(403).json({
+        success: false,
+        error: 'No tienes permiso para ver este usuario'
+      });
+    }
+
     res.json({
       success: true,
-      usuario: result.rows[0]
+      usuario
     });
   } catch (error) {
     console.error('Error en obtener usuario:', error);
@@ -86,8 +147,10 @@ router.get('/:id', esSuperadmin, async (req, res) => {
 /**
  * POST /api/usuarios
  * Crear nuevo usuario
+ * - Superadmin: Puede crear cualquier rol
+ * - CEO: Puede crear Directivo y Comercial (solo en su empresa)
  */
-router.post('/', esSuperadmin, async (req, res) => {
+router.post('/', esCeoOSuperadmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { nombre, email, password, role, empresa_id } = req.body;
@@ -97,6 +160,41 @@ router.post('/', esSuperadmin, async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'Nombre, email y password son obligatorios'
+      });
+    }
+
+    if (!role || !ROLES_VALIDOS.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        error: `Rol inválido. Roles válidos: ${ROLES_VALIDOS.join(', ')}`
+      });
+    }
+
+    // Validar permisos según rol del usuario autenticado
+    if (req.usuario?.role === 'ceo') {
+      // CEO solo puede crear Directivo y Comercial
+      if (!['directivo', 'comercial'].includes(role)) {
+        return res.status(403).json({
+          success: false,
+          error: 'CEO solo puede crear usuarios Directivo y Comercial'
+        });
+      }
+      // CEO solo puede asignar su propia empresa
+      if (empresa_id && empresa_id !== req.usuario.empresa_id) {
+        return res.status(403).json({
+          success: false,
+          error: 'CEO solo puede asignar usuarios a su propia empresa'
+        });
+      }
+    }
+
+    // Si no es superadmin, debe tener empresa_id
+    const empresaFinal = req.usuario?.role === 'ceo' ? req.usuario.empresa_id : (empresa_id || null);
+
+    if (role !== 'superadmin' && !empresaFinal) {
+      return res.status(400).json({
+        success: false,
+        error: 'CEO, Directivo y Comercial requieren empresa_id'
       });
     }
 
@@ -110,12 +208,24 @@ router.post('/', esSuperadmin, async (req, res) => {
       });
     }
 
+    // Verificar que la empresa existe
+    if (empresaFinal) {
+      const empresaQuery = 'SELECT id FROM empresas WHERE id = $1';
+      const empresaResult = await client.query(empresaQuery, [empresaFinal]);
+      if (empresaResult.rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Empresa no encontrada'
+        });
+      }
+    }
+
     // Hash de contraseña
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Crear usuario
+    // Crear usuario con password_hash (nombre correcto del campo en Supabase)
     const insertQuery = `INSERT INTO usuarios 
-                        (nombre, email, password, role, empresa_id, activo) 
+                        (nombre, email, password_hash, role, empresa_id, activo) 
                         VALUES ($1, $2, $3, $4, $5, true) 
                         RETURNING id, nombre, email, role, empresa_id, activo`;
     
@@ -123,8 +233,8 @@ router.post('/', esSuperadmin, async (req, res) => {
       nombre,
       email,
       hashedPassword,
-      role || 'admin',
-      empresa_id || null
+      role,
+      empresaFinal
     ]);
 
     // Obtener datos completos con nombre de empresa
@@ -159,8 +269,10 @@ router.post('/', esSuperadmin, async (req, res) => {
 /**
  * PUT /api/usuarios/:id
  * Editar usuario
+ * - Superadmin: Puede editar cualquier usuario
+ * - CEO: Puede editar usuarios de su empresa (no puede cambiar rol)
  */
-router.put('/:id', esSuperadmin, async (req, res) => {
+router.put('/:id', esCeoOSuperadmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
@@ -178,6 +290,24 @@ router.put('/:id', esSuperadmin, async (req, res) => {
     }
 
     const usuarioActual = usuarioActualResult.rows[0];
+
+    // Validar permisos según rol del usuario autenticado
+    if (req.usuario?.role === 'ceo') {
+      // CEO solo puede editar usuarios de su empresa
+      if (usuarioActual.empresa_id !== req.usuario.empresa_id) {
+        return res.status(403).json({
+          success: false,
+          error: 'CEO solo puede editar usuarios de su empresa'
+        });
+      }
+      // CEO no puede cambiar el rol
+      if (role && role !== usuarioActual.role) {
+        return res.status(403).json({
+          success: false,
+          error: 'CEO no puede cambiar el rol de un usuario'
+        });
+      }
+    }
 
     // Si cambia email, verificar que no exista otro con ese email
     if (email && email !== usuarioActual.email) {
@@ -210,18 +340,24 @@ router.put('/:id', esSuperadmin, async (req, res) => {
 
     if (password !== undefined && password !== '') {
       const hashedPassword = await bcrypt.hash(password, 10);
-      updates.push(`password = $${paramIndex}`);
+      updates.push(`password_hash = $${paramIndex}`);
       values.push(hashedPassword);
       paramIndex++;
     }
 
-    if (role !== undefined) {
+    if (role !== undefined && req.usuario?.role === 'superadmin') {
+      if (!ROLES_VALIDOS.includes(role)) {
+        return res.status(400).json({
+          success: false,
+          error: `Rol inválido. Roles válidos: ${ROLES_VALIDOS.join(', ')}`
+        });
+      }
       updates.push(`role = $${paramIndex}`);
       values.push(role);
       paramIndex++;
     }
 
-    if (empresa_id !== undefined) {
+    if (empresa_id !== undefined && req.usuario?.role === 'superadmin') {
       updates.push(`empresa_id = $${paramIndex}`);
       values.push(empresa_id || null);
       paramIndex++;
@@ -282,13 +418,15 @@ router.put('/:id', esSuperadmin, async (req, res) => {
 /**
  * DELETE /api/usuarios/:id
  * Eliminar usuario
+ * - Superadmin: Puede eliminar cualquier usuario
+ * - CEO: Puede eliminar usuarios de su empresa
  */
-router.delete('/:id', esSuperadmin, async (req, res) => {
+router.delete('/:id', esCeoOSuperadmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
 
-    // No permitir eliminar superadmin a sí mismo
+    // No permitir eliminar a sí mismo
     if (req.usuario?.id === parseInt(id)) {
       return res.status(400).json({
         success: false,
@@ -305,6 +443,19 @@ router.delete('/:id', esSuperadmin, async (req, res) => {
         success: false,
         error: 'Usuario no encontrado'
       });
+    }
+
+    const usuario = usuarioResult.rows[0];
+
+    // Validar permisos
+    if (req.usuario?.role === 'ceo') {
+      // CEO solo puede eliminar usuarios de su empresa
+      if (usuario.empresa_id !== req.usuario.empresa_id) {
+        return res.status(403).json({
+          success: false,
+          error: 'CEO solo puede eliminar usuarios de su empresa'
+        });
+      }
     }
 
     // Eliminar usuario

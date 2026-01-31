@@ -6,6 +6,9 @@ import pool from '../config/database.js';
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'tu-clave-secreta-change-in-production';
 
+// Roles válidos del sistema
+const ROLES_VALIDOS = ['superadmin', 'ceo', 'directivo', 'comercial'];
+
 /**
  * POST /api/auth/register
  * Registrar nuevo usuario (solo admin puede crear usuarios)
@@ -13,37 +16,52 @@ const JWT_SECRET = process.env.JWT_SECRET || 'tu-clave-secreta-change-in-product
 router.post('/register', async (req, res) => {
   const { email, password, nombre, empresa_id, role } = req.body;
 
-  if (!email || !password || !nombre || !empresa_id) {
-    return res.status(400).json({ error: 'Faltan campos requeridos' });
+  if (!email || !password || !nombre) {
+    return res.status(400).json({ error: 'Faltan campos requeridos: email, password, nombre' });
+  }
+
+  // Validar rol
+  if (role && !ROLES_VALIDOS.includes(role)) {
+    return res.status(400).json({ 
+      error: `Rol inválido. Roles válidos: ${ROLES_VALIDOS.join(', ')}` 
+    });
   }
 
   const client = await pool.connect();
   try {
-    // Verificar que la empresa existe
-    const empresaResult = await client.query(
-      'SELECT id FROM empresas WHERE id = $1',
-      [empresa_id]
-    );
+    // Si no es superadmin, debe tener empresa_id
+    if (role !== 'superadmin' && !empresa_id) {
+      return res.status(400).json({ 
+        error: 'Los roles CEO, Directivo y Comercial requieren empresa_id' 
+      });
+    }
 
-    if (empresaResult.rows.length === 0) {
-      return res.status(400).json({ error: 'Empresa no encontrada' });
+    // Verificar que la empresa existe (si se proporciona)
+    if (empresa_id) {
+      const empresaResult = await client.query(
+        'SELECT id FROM empresas WHERE id = $1',
+        [empresa_id]
+      );
+      if (empresaResult.rows.length === 0) {
+        return res.status(400).json({ error: 'Empresa no encontrada' });
+      }
     }
 
     // Hash de contraseña
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Crear usuario
+    // Crear usuario con password_hash (nombre del campo en Supabase)
     const result = await client.query(
-      `INSERT INTO usuarios (email, password_hash, nombre, empresa_id, role) 
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
-      [email, passwordHash, nombre, empresa_id, role || 'gerente']
+      `INSERT INTO usuarios (email, password_hash, nombre, empresa_id, role, activo) 
+       VALUES ($1, $2, $3, $4, $5, true)
+       RETURNING id, email, nombre, empresa_id, role`,
+      [email, passwordHash, nombre, empresa_id || null, role || 'comercial']
     );
 
     res.status(201).json({
       success: true,
       message: 'Usuario creado correctamente',
-      usuario_id: result.rows[0].id
+      usuario: result.rows[0]
     });
 
   } catch (error) {
@@ -73,21 +91,27 @@ router.post('/login', async (req, res) => {
     const result = await client.query(
       `SELECT u.*, e.nombre as empresa_nombre 
        FROM usuarios u 
-       JOIN empresas e ON u.empresa_id = e.id 
+       LEFT JOIN empresas e ON u.empresa_id = e.id 
        WHERE u.email = $1 AND u.activo = TRUE`,
       [email]
     );
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Credenciales inválidas' });
+      return res.status(401).json({ 
+        success: false,
+        error: 'Credenciales inválidas' 
+      });
     }
 
     const usuario = result.rows[0];
 
-    // Verificar contraseña
+    // Verificar contraseña contra password_hash (campo correcto en Supabase)
     const passwordValida = await bcrypt.compare(password, usuario.password_hash);
     if (!passwordValida) {
-      return res.status(401).json({ error: 'Credenciales inválidas' });
+      return res.status(401).json({ 
+        success: false,
+        error: 'Credenciales inválidas' 
+      });
     }
 
     // Generar JWT
@@ -117,7 +141,10 @@ router.post('/login', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error en login:', error);
-    res.status(500).json({ error: 'Error al iniciar sesión' });
+    res.status(500).json({ 
+      success: false,
+      error: 'Error al iniciar sesión' 
+    });
   } finally {
     client.release();
   }
@@ -133,7 +160,7 @@ router.get('/me', autenticar, async (req, res) => {
     const result = await client.query(
       `SELECT u.*, e.nombre as empresa_nombre 
        FROM usuarios u 
-       JOIN empresas e ON u.empresa_id = e.id 
+       LEFT JOIN empresas e ON u.empresa_id = e.id 
        WHERE u.id = $1`,
       [req.usuario.usuario_id]
     );
@@ -144,6 +171,7 @@ router.get('/me', autenticar, async (req, res) => {
 
     const usuario = result.rows[0];
     res.json({
+      success: true,
       id: usuario.id,
       nombre: usuario.nombre,
       email: usuario.email,
@@ -152,7 +180,11 @@ router.get('/me', autenticar, async (req, res) => {
       role: usuario.role
     });
   } catch (error) {
-    res.status(500).json({ error: 'Error al obtener datos del usuario' });
+    console.error('❌ Error en /api/auth/me:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Error al obtener datos del usuario' 
+    });
   } finally {
     client.release();
   }
