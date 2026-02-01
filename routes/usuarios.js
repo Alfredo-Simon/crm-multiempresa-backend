@@ -56,13 +56,13 @@ router.get('/', async (req, res) => {
                ORDER BY u.created_at DESC`;
       params = [];
     } else if (req.usuario?.role === 'ceo') {
-      // CEO ve solo su empresa
+      // CEO ve solo usuarios de su empresa (no Superadmin)
       query = `SELECT u.id, u.nombre, u.email, u.role, u.activo, u.empresa_id, e.nombre as nombre_empresa 
                FROM usuarios u 
                LEFT JOIN empresas e ON u.empresa_id = e.id 
-               WHERE u.empresa_id = $1 OR u.id = $2
+               WHERE u.empresa_id = $1 AND u.role != 'superadmin'
                ORDER BY u.created_at DESC`;
-      params = [req.usuario.empresa_id, req.usuario.usuario_id];
+      params = [req.usuario.empresa_id];
     } else {
       // Directivo y Comercial no pueden ver lista de usuarios
       return res.status(403).json({
